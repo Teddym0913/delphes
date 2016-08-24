@@ -30,6 +30,9 @@
  */
 
 #include "classes/DelphesModule.h"
+#include "ExRootAnalysis/ExRootResult.h"
+#include "ExRootAnalysis/ExRootFilter.h"
+#include "ExRootAnalysis/ExRootClassifier.h"
 
 #include <map>
 
@@ -51,7 +54,9 @@ public:
   void Finish();
 
 private:
-
+  
+  Int_t fBitNumber;
+  
   Double_t fDeltaR;
 
 #if !defined(__CINT__) && !defined(__CLING__)
@@ -74,5 +79,22 @@ private:
 
   ClassDef(TauTagging, 1)
 };
+
+
+//------------------------------------------------------------------------------
+
+class TauTaggingPartonClassifier : public ExRootClassifier
+{
+public:
+
+  TauTaggingPartonClassifier(const TObjArray *array);
+
+  Int_t GetCategory(TObject *object);
+
+  Double_t fEtaMax, fPTMin;
+
+  const TObjArray *fParticleInputArray;
+};
+
 
 #endif

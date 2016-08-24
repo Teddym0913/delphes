@@ -19,10 +19,12 @@
 #include <stdexcept>
 #include <iostream>
 #include <sstream>
+#include <string>
 
 #include <signal.h>
 
 #include "Pythia.h"
+#include "Pythia8Plugins/CombineMatchingInput.h"
 
 #include "TROOT.h"
 #include "TApplication.h"
@@ -37,6 +39,7 @@
 #include "modules/Delphes.h"
 #include "classes/DelphesClasses.h"
 #include "classes/DelphesFactory.h"
+#include "classes/DelphesLHEFReader.h"
 
 #include "ExRootAnalysis/ExRootTreeWriter.h"
 #include "ExRootAnalysis/ExRootTreeBranch.h"
@@ -142,24 +145,89 @@ void SignalHandler(int sig)
   interrupted = true;
 }
 
+
+// Single-particle gun. The particle must be a colour singlet.
+// Input: flavour, energy, direction (theta, phi).
+// If theta < 0 then random choice over solid angle.
+// Optional final argument to put particle at rest => E = m.
+// from pythia8 example 21
+
+void fillParticle(int id, double ee_max, double thetaIn, double phiIn,
+  Pythia8::Event& event, Pythia8::ParticleData& pdt, Pythia8::Rndm& rndm, bool atRest = false) {
+
+  // Reset event record to allow for new event.
+  event.reset();
+
+  // Angles uniform in solid angle.
+  double cThe, sThe, phi, ee;
+  cThe = 2. * rndm.flat() - 1.;
+  sThe = Pythia8::sqrtpos(1. - cThe * cThe);
+  phi = 2. * M_PI * rndm.flat();
+  ee = pow(10,1+(log10(ee_max)-1)*rndm.flat());
+  double mm = pdt.mSel(id);
+  double pp = Pythia8::sqrtpos(ee*ee - mm*mm);
+
+  // Store the particle in the event record.
+  event.append( id, 1, 0, 0, pp * sThe * cos(phi), pp * sThe * sin(phi), pp * cThe, ee, mm);
+
+}
+
+void fillPartons(int type, double ee_max, Pythia8::Event& event, Pythia8::ParticleData& pdt,
+  Pythia8::Rndm& rndm) {
+
+  // Reset event record to allow for new event.
+  event.reset();
+
+  // Angles uniform in solid angle.
+  double cThe, sThe, phi, ee;
+
+  // Information on a q qbar system, to be hadronized.
+
+  cThe = 2. * rndm.flat() - 1.;
+  sThe = Pythia8::sqrtpos(1. - cThe * cThe);
+  phi = 2. * M_PI * rndm.flat();
+  ee = pow(10,1+(log10(ee_max)-1)*rndm.flat());
+  double mm = pdt.m0(type);
+  double pp = Pythia8::sqrtpos(ee*ee - mm*mm);
+  if (type == 21)
+  {
+    event.append( 21, 23, 101, 102, pp * sThe * cos(phi), pp * sThe * sin(phi), pp * cThe, ee);
+    event.append( 21, 23, 102, 101, -pp * sThe * cos(phi), -pp * sThe * sin(phi), -pp * cThe, ee);
+  }
+  else
+  {
+    event.append(  type, 23, 101,   0, pp * sThe * cos(phi), pp * sThe * sin(phi), pp * cThe, ee, mm);
+    event.append( -type, 23,   0, 101, -pp * sThe * cos(phi), -pp * sThe * sin(phi), -pp * cThe, ee, mm);
+  }
+}
+
+
 //---------------------------------------------------------------------------
 
 int main(int argc, char *argv[])
 {
   char appName[] = "DelphesPythia8";
   stringstream message;
+  FILE *inputFile = 0;
   TFile *outputFile = 0;
   TStopwatch readStopWatch, procStopWatch;
   ExRootTreeWriter *treeWriter = 0;
   ExRootTreeBranch *branchEvent = 0;
+  ExRootTreeBranch *branchEventLHEF = 0, *branchWeightLHEF = 0;
   ExRootConfReader *confReader = 0;
   Delphes *modularDelphes = 0;
   DelphesFactory *factory = 0;
   TObjArray *stableParticleOutputArray = 0, *allParticleOutputArray = 0, *partonOutputArray = 0;
+  TObjArray *stableParticleOutputArrayLHEF = 0, *allParticleOutputArrayLHEF = 0, *partonOutputArrayLHEF = 0;
+  DelphesLHEFReader *reader = 0;
   Long64_t eventCounter, errorCounter;
   Long64_t numberOfEvents, timesAllowErrors;
 
   Pythia8::Pythia *pythia = 0;
+ 
+  // for matching
+  Pythia8::CombineMatchingInput *combined = 0;
+  Pythia8::UserHooks* matching = 0;
 
   if(argc != 4)
   {
@@ -204,10 +272,17 @@ int main(int argc, char *argv[])
     stableParticleOutputArray = modularDelphes->ExportArray("stableParticles");
     partonOutputArray = modularDelphes->ExportArray("partons");
 
-    modularDelphes->InitTask();
-
-    // Initialize pythia
+    // Initialize Pythia
     pythia = new Pythia8::Pythia;
+  
+    // jet matching
+    matching = combined->getHook(*pythia);
+    if (!matching)
+    {
+      throw runtime_error("can't do matching");
+    }
+    pythia->setUserHooksPtr(matching);
+ 
 
     if(pythia == NULL)
     {
@@ -215,11 +290,35 @@ int main(int argc, char *argv[])
     }
 
     // Read in commands from configuration file
-    pythia->readFile(argv[2]);
+    if(!pythia->readFile(argv[2]))
+    {
+      message << "can't read Pythia8 configuration file " << argv[2] << endl;
+      throw runtime_error(message.str());
+    }
 
     // Extract settings to be used in the main program
     numberOfEvents = pythia->mode("Main:numberOfEvents");
     timesAllowErrors = pythia->mode("Main:timesAllowErrors");
+
+    // Check if particle gun
+    if (!pythia->flag("Main:spareFlag1"))
+    {
+      inputFile = fopen(pythia->word("Beams:LHEF").c_str(), "r");
+      if(inputFile)
+      {
+        reader = new DelphesLHEFReader;
+        reader->SetInputFile(inputFile);
+
+        branchEventLHEF = treeWriter->NewBranch("EventLHEF", LHEFEvent::Class());
+        branchWeightLHEF = treeWriter->NewBranch("WeightLHEF", LHEFWeight::Class());
+
+        allParticleOutputArrayLHEF = modularDelphes->ExportArray("allParticlesLHEF");
+        stableParticleOutputArrayLHEF = modularDelphes->ExportArray("stableParticlesLHEF");
+        partonOutputArrayLHEF = modularDelphes->ExportArray("partonsLHEF");
+      }
+    }
+
+    modularDelphes->InitTask();
 
     pythia->init();
 
@@ -233,19 +332,37 @@ int main(int argc, char *argv[])
     readStopWatch.Start();
     for(eventCounter = 0; eventCounter < numberOfEvents && !interrupted; ++eventCounter)
     {
+      while(reader && reader->ReadBlock(factory, allParticleOutputArrayLHEF,
+        stableParticleOutputArrayLHEF, partonOutputArrayLHEF) && !reader->EventReady());
+
+      if (pythia->flag("Main:spareFlag1"))
+      {
+        if (pythia->mode("Main:spareMode1") == 11 || pythia->mode("Main:spareMode1") == 13 || pythia->mode("Main:spareMode1") == 22) 
+        { 
+          fillParticle( pythia->mode("Main:spareMode1"), pythia->parm("Main:spareParm1"), -1., 0.,pythia->event, pythia->particleData, pythia->rndm, 0);
+        }
+        else fillPartons( pythia->mode("Main:spareMode1"), pythia->parm("Main:spareParm1"), pythia->event, pythia->particleData, pythia->rndm);
+      }
+
       if(!pythia->next())
       {
         // If failure because reached end of file then exit event loop
-        if (pythia->info.atEndOfFile())
+        if(pythia->info.atEndOfFile())
         {
           cerr << "Aborted since reached end of Les Houches Event File" << endl;
           break;
         }
 
         // First few failures write off as "acceptable" errors, then quit
-        if (++errorCounter < timesAllowErrors) continue;
-        cerr << "Event generation aborted prematurely, owing to error!" << endl;
-        break;
+        if(++errorCounter > timesAllowErrors)
+        {
+          cerr << "Event generation aborted prematurely, owing to error!" << endl;
+          break;
+        }
+
+        modularDelphes->Clear();
+        reader->Clear();
+        continue;
       }
 
       readStopWatch.Stop();
@@ -257,10 +374,17 @@ int main(int argc, char *argv[])
       modularDelphes->ProcessTask();
       procStopWatch.Stop();
 
+      if(reader)
+      {
+        reader->AnalyzeEvent(branchEventLHEF, eventCounter, &readStopWatch, &procStopWatch);
+        reader->AnalyzeWeight(branchWeightLHEF);
+      }
+
       treeWriter->Fill();
 
       treeWriter->Clear();
       modularDelphes->Clear();
+      if(reader) reader->Clear();
 
       readStopWatch.Start();
       progressBar.Update(eventCounter, eventCounter);
@@ -276,6 +400,7 @@ int main(int argc, char *argv[])
 
     cout << "** Exiting..." << endl;
 
+    delete reader;
     delete pythia;
     delete modularDelphes;
     delete confReader;

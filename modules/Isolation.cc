@@ -24,7 +24,7 @@
  *  to the candidate's transverse momentum. outputs candidates that have
  *  the transverse momenta fraction within (PTRatioMin, PTRatioMax].
  *
- *  \author P. Demin - UCL, Louvain-la-Neuve
+ *  \author P. Demin, M. Selvaggi, R. Gerosa - UCL, Louvain-la-Neuve
  *
  */
 
@@ -108,6 +108,11 @@ void Isolation::Init()
 
   fUsePTSum = GetBool("UsePTSum", false);
 
+  fUseRhoCorrection = GetBool("UseRhoCorrection", true);
+
+  fDeltaRMin = GetDouble("DeltaRMin", 0.01);
+  fUseMiniCone = GetBool("UseMiniCone", false);
+
   fClassifier->fPTMin = GetDouble("PTMin", 0.5);
 
   // import input array(s)
@@ -152,16 +157,11 @@ void Isolation::Process()
 {
   Candidate *candidate, *isolation, *object;
   TObjArray *isolationArray;
-  Double_t sum, ratio;
-  Int_t counter;
+  Double_t sumChargedNoPU, sumChargedPU, sumNeutral, sumAllParticles;
+  Double_t sumDBeta, ratioDBeta, sumRhoCorr, ratioRhoCorr, sum, ratio;
+  Bool_t pass = kFALSE;
   Double_t eta = 0.0;
   Double_t rho = 0.0;
-
-  if(fRhoInputArray && fRhoInputArray->GetEntriesFast() > 0)
-  {
-    candidate = static_cast<Candidate*>(fRhoInputArray->At(0));
-    rho = candidate->Momentum.Pt();
-  }
 
   // select isolation objects
   fFilter->Reset();
@@ -178,22 +178,6 @@ void Isolation::Process()
     const TLorentzVector &candidateMomentum = candidate->Momentum;
     eta = TMath::Abs(candidateMomentum.Eta());
 
-    // loop over all input tracks
-    sum = 0.0;
-    counter = 0;
-    itIsolationArray.Reset();
-    while((isolation = static_cast<Candidate*>(itIsolationArray.Next())))
-    {
-      const TLorentzVector &isolationMomentum = isolation->Momentum;
-
-      if(candidateMomentum.DeltaR(isolationMomentum) <= fDeltaRMax &&
-         candidate->GetUniqueID() != isolation->GetUniqueID())
-      {
-        sum += isolationMomentum.Pt();
-        ++counter;
-      }
-    }
-
     // find rho
     rho = 0.0;
     if(fRhoInputArray)
@@ -208,11 +192,86 @@ void Isolation::Process()
       }
     }
 
-    // correct sum for pile-up contamination
-    sum = sum - rho*fDeltaRMax*fDeltaRMax*TMath::Pi();
+    // loop over all input tracks
 
-    ratio = sum/candidateMomentum.Pt();
-    if((fUsePTSum && sum > fPTSumMax) || ratio > fPTRatioMax) continue;
+    sumNeutral = 0.0;
+    sumChargedNoPU = 0.0;
+    sumChargedPU = 0.0;
+    sumAllParticles = 0.0;
+
+    itIsolationArray.Reset();
+    while((isolation = static_cast<Candidate*>(itIsolationArray.Next())))
+    {
+      const TLorentzVector &isolationMomentum = isolation->Momentum;
+
+      if(fUseMiniCone)
+      {
+         pass = candidateMomentum.DeltaR(isolationMomentum) <= fDeltaRMax &&
+         candidateMomentum.DeltaR(isolationMomentum) > fDeltaRMin;
+      }
+      else
+      {
+         pass = candidateMomentum.DeltaR(isolationMomentum) <= fDeltaRMax &&
+         candidate->GetUniqueID() != isolation->GetUniqueID();
+      }
+
+      if(pass)
+      {
+
+        sumAllParticles += isolationMomentum.Pt();
+        if(isolation->Charge != 0)
+        {
+          if(isolation->IsRecoPU)
+          {
+            sumChargedPU += isolationMomentum.Pt();
+          }
+          else
+          {
+            sumChargedNoPU += isolationMomentum.Pt();
+          }
+        }
+        else
+        {
+          sumNeutral += isolationMomentum.Pt();
+        }
+      }
+
+    }
+
+   // find rho
+    rho = 0.0;
+    if(fRhoInputArray)
+    {
+      fItRhoInputArray->Reset();
+      while((object = static_cast<Candidate*>(fItRhoInputArray->Next())))
+      {
+        if(eta >= object->Edges[0] && eta < object->Edges[1])
+        {
+          rho = object->Momentum.Pt();
+        }
+      }
+    }
+
+
+
+    // correct sum for pile-up contamination
+    sumDBeta = sumChargedNoPU + TMath::Max(sumNeutral - 0.5*sumChargedPU, 0.0);
+    sumRhoCorr = sumChargedNoPU + TMath::Max(sumNeutral - TMath::Max(rho, 0.0)*fDeltaRMax*fDeltaRMax*TMath::Pi(), 0.0);
+    ratioDBeta = sumDBeta/candidateMomentum.Pt();
+    ratioRhoCorr = sumRhoCorr/candidateMomentum.Pt();
+
+    candidate->IsolationVar = ratioDBeta;
+    candidate->IsolationVarRhoCorr = ratioRhoCorr;
+    candidate->SumPtCharged = sumChargedNoPU;
+    candidate->SumPtNeutral = sumNeutral;
+    candidate->SumPtChargedPU = sumChargedPU;
+    candidate->SumPt = sumAllParticles;
+
+    sum = fUseRhoCorrection ? sumRhoCorr : sumDBeta;
+    if(fUsePTSum && sum > fPTSumMax) continue;
+
+    ratio = fUseRhoCorrection ? ratioRhoCorr : ratioDBeta;
+    if(!fUsePTSum && ratio > fPTRatioMax) continue;
 
     fOutputArray->Add(candidate);
   }

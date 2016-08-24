@@ -40,6 +40,8 @@ namespace fastjet {
   class JetMedianBackgroundEstimator;
   namespace contrib {
     class NjettinessPlugin;
+    class AxesDefinition; 
+    class MeasureDefinition;    
   }
 }
 
@@ -77,10 +79,32 @@ private:
   //-- N (sub)jettiness parameters --
 
   Bool_t fComputeNsubjettiness;
+  fastjet::contrib::AxesDefinition *fAxesDef; 
+  fastjet::contrib::MeasureDefinition *fMeasureDef;    
   Double_t fBeta;
   Int_t fAxisMode;
   Double_t fRcutOff;
   Int_t fN ;
+
+  //-- Trimming parameters --
+  
+  Bool_t fComputeTrimming;
+  Double_t fRTrim;
+  Double_t fPtFracTrim;
+  
+  //-- Pruning parameters --
+
+  Bool_t fComputePruning;
+  Double_t fZcutPrun;
+  Double_t fRcutPrun;
+  Double_t fRPrun;
+
+  //-- SoftDrop parameters --
+
+  Bool_t fComputeSoftDrop;
+  Double_t fBetaSoftDrop;
+  Double_t fSymmetryCutSoftDrop;
+  Double_t fR0SoftDrop;
 
   // --- FastJet Area method --------
 
